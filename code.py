@@ -1,9 +1,14 @@
+# SPDX-FileCopyrightText: 2022 Sam Knowles/Sciencegey https://github.com/sciencegey/cirpyClock
+# SPDX-License-Identifier: GPL-3
+
+# Simple CircuitPython clock based on a 7 segment display, DS3231 RTC and QT Py RP2040
+
 import board
 
-sqwPin = board.MOSI
-dstPin = board.MISO
+sqwPin = board.MOSI     # Pin for the square-wave output from the DS3231
+dstPin = board.MISO     # Pin for the DST switch
 
-time24h = True
+time24h = True  # Whether to display the time in 24 hour format or 12 hour format
 
 # ~~~~~ End of configuration! ~~~~~
 
@@ -15,13 +20,13 @@ import digitalio
 import analogio
 import math
 
-ldr = analogio.AnalogIn(board.A1)
+ldr = analogio.AnalogIn(board.A0)   # Light sensor for screen brightness
 
-i2c = io.I2C(board.SCL, board.SDA)
+i2c = io.I2C(board.SCL, board.SDA)  # Creates the I2C connection
 
 dstSelect = digitalio.DigitalInOut(dstPin)
 dstSelect.pull = digitalio.Pull.DOWN # Active is high, uses the internal pull down
-dst = dstSelect.value   # Reads the DST switch position and puts it in DST
+dst = dstSelect.value   # Reads the DST switch position and puts it in DST variable
 
 # Sets the SQW pin to output a 1Hz square wave
 while not i2c.try_lock():
@@ -44,26 +49,23 @@ import adafruit_ht16k33.segments
 display = adafruit_ht16k33.segments.Seg7x4(i2c)
 
 display.auto_write = False  # Disable auto-write; use .show() to write to the screen
-display.brightness = 1 # Sets the brightness to full
-
-t = rtc.datetime    # Gets current datetime
-display.print("{:02}{:02}".format(t.tm_hour, t.tm_min))    # Prints current datetime to the screen (each number has to be 2 digits long, so adds a leading 0)
-display.show()  # Writes to the screen
+display.brightness = 0 # Sets the brightness to full
 
 cursor = [";",":"]  # ; is middle lights off, : is on
 
 ### ~~~~~Functions go here!~~~~~
 
 def screenBrightness():
+    # Measures the light-sensor value and averages it
     measures = []
     for _ in range(100):
         measures.append(ldr.value/65535)
         time.sleep(0.01)
     
-    # Rounds up to 2 decimal places
-    result = math.ceil((sum(measures)/len(measures))*100)/100
+    # Averages and rounds down to 2 decimal places
+    result = math.floor((sum(measures)/len(measures))*100)/100
     
-    result = result + 0.3   # Adds some brightness to account for the covered front; comment out if you don't need it
+    # result = result + 0.3   # Adds some brightness to account for the covered front; comment out if you don't need it
 
     result = max(min(result, 1), 0) # Makes sure the result stays between 1 and 0
 
@@ -71,25 +73,46 @@ def screenBrightness():
     #print (result)
     return (result)
 
+
 async def catch_interrupt(pin):
     with countio.Counter(pin) as interrupt:
         b = False
         while True:
+            # If the square wave interupt is triggered, then update the screen
             if interrupt.count > 0:
                 interrupt.count = 0
-                b = not b
-                t = rtc.datetime
+                b = not b   # Toggles the blinky colon
+                t = rtc.datetime    # Gets current time from the RTC
+                t = time.struct_time([sum(x) for x in zip(t,(0, 0, 0, dst, 0, 0, 0, 0, 0))])    # Adds DST
                 
-                display.print("{}{:02}".format(t.tm_hour, t.tm_min))
-                display.print(cursor[b])
-                # print("The time is {}:{:02}:{:02}".format(t.tm_hour+dst, t.tm_min, t.tm_sec))
+                if time24h:
+                    # If it's 24 hour time, just print the current time to the screen
+                    display.print("{:02}{:02}".format(t.tm_hour, t.tm_min))
+                else:
+                    # Otherwise calculate the time in 12 hour format
+                    if (t.tm_hour) <= 12:
+                        # If it's 12 or below just display the time
+                        display.print("{:02}{:02}".format(t.tm_hour, t.tm_min))
+                    else:
+                        # And if it's after 12, just subtract 12!
+                        display.print("{:02}{:02}".format((t.tm_hour)-12, t.tm_min))
 
-                display.show()
+                # Makes sure the time doesn't "over-run" if it's DST
+                if t.tm_hour == 24 and time24h:
+                    display.print("{:02}{:02}".format("00", t.tm_min))
+                elif t.tm_hour == 24 and not time24h:
+                    display.print("{:02}{:02}".format("12", t.tm_min))
+                
+                display.print(cursor[b])    # Display the cursor
+                # print("The time is {}:{:02}:{:02}".format(t.tm_hour, t.tm_min, t.tm_sec))
+
+                display.show()  # And then write to the display!
             
             display.brightness = screenBrightness();
             await asyncio.sleep(0)
 
 async def main():
+    # This just creates the interupt and then runs it
     interrupt_task = asyncio.create_task(catch_interrupt(sqwPin))
     await asyncio.gather(interrupt_task)
 
